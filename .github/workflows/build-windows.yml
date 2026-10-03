@@ -1,0 +1,137 @@
+name: Build CaptionBrain PC v1.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "CaptionBrain_PC_v1.0_BuildReady.zip"
+      - ".github/workflows/build-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Extract CaptionBrain PC source
+        shell: pwsh
+        run: |
+          if (Test-Path buildsrc) { Remove-Item buildsrc -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
+          Expand-Archive -Path "CaptionBrain_PC_v1.0_BuildReady.zip" -DestinationPath "buildsrc" -Force
+
+          if (-not (Test-Path "buildsrc\CaptionBrain_PC_v1.0\requirements.txt")) {
+            Write-Error "CaptionBrain project was not extracted correctly."
+            exit 1
+          }
+
+          Write-Host "CaptionBrain source extracted successfully."
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "buildsrc/CaptionBrain_PC_v1.0/requirements.txt"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        working-directory: buildsrc/CaptionBrain_PC_v1.0
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Download bundled multilingual Whisper Small model
+        shell: pwsh
+        working-directory: buildsrc/CaptionBrain_PC_v1.0
+        run: |
+          @'
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="Systran/faster-whisper-small",
+              local_dir="resources/models/faster-whisper-small",
+              allow_patterns=["*.json", "*.txt", "*.model", "*.bin"]
+          )
+          '@ | python -
+
+      - name: Install and bundle Tesseract OCR
+        shell: pwsh
+        working-directory: buildsrc/CaptionBrain_PC_v1.0
+        run: |
+          choco install tesseract -y --no-progress
+
+          New-Item -ItemType Directory -Force -Path resources/tesseract | Out-Null
+
+          if (Test-Path "C:\Program Files\Tesseract-OCR") {
+            Copy-Item "C:\Program Files\Tesseract-OCR\*" resources/tesseract -Recurse -Force
+          }
+          else {
+            Write-Error "Tesseract installation folder not found."
+            exit 1
+          }
+
+      - name: Run CaptionBrain tests
+        shell: pwsh
+        working-directory: buildsrc/CaptionBrain_PC_v1.0
+        run: |
+          python -m pytest -q
+
+      - name: Build portable Windows app
+        shell: pwsh
+        working-directory: buildsrc/CaptionBrain_PC_v1.0
+        run: |
+          pyinstaller CaptionBrain.spec --noconfirm
+
+          if (-not (Test-Path "dist\CaptionBrain\CaptionBrain.exe")) {
+            Write-Error "CaptionBrain.exe was not created."
+            exit 1
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
+      - name: Build CaptionBrain installer
+        shell: pwsh
+        working-directory: buildsrc/CaptionBrain_PC_v1.0
+        run: |
+          New-Item -ItemType Directory -Force -Path installer_output | Out-Null
+
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "build\CaptionBrain.iss"
+
+          if (-not (Test-Path "installer_output\CaptionBrain-Setup-v1.0.0.exe")) {
+            Write-Error "Windows installer was not created."
+            exit 1
+          }
+
+      - name: Create portable ZIP
+        shell: pwsh
+        working-directory: buildsrc/CaptionBrain_PC_v1.0
+        run: |
+          Compress-Archive `
+            -Path "dist\CaptionBrain\*" `
+            -DestinationPath "CaptionBrain-Portable-v1.0.0.zip" `
+            -Force
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: CaptionBrain-PC-v1.0-Installer
+          path: buildsrc/CaptionBrain_PC_v1.0/installer_output/CaptionBrain-Setup-v1.0.0.exe
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: CaptionBrain-PC-v1.0-Portable
+          path: buildsrc/CaptionBrain_PC_v1.0/CaptionBrain-Portable-v1.0.0.zip
+          if-no-files-found: error
+          compression-level: 0
